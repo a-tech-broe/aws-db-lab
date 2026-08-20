@@ -1,5 +1,116 @@
 # aws-db-lab
 
+A database SRE lab: a production-shaped PostgreSQL environment on AWS, built
+with Terraform, then deliberately broken in twelve phases so every failure mode
+gets measured and written down.
+
+**Status: Phase 1 complete.** 64 resources, `terraform validate` and
+`terraform plan` clean. Nothing has been applied to AWS yet — see Quickstart.
+
+| Phase | Scope                              | State           |
+| ----- | ---------------------------------- | --------------- |
+| 1     | PostgreSQL foundation              | **built**       |
+| 2     | Application (ALB → ECS → RDS)      | not started     |
+| 3     | Grafana observability              | not started     |
+| 4     | Failover lab                       | not started     |
+| 5–12  | Backup, connections, performance, replication, security, migration, DR, chaos | not started |
+
+## What Phase 1 builds
+
+```
+terraform/
+├── environments/dev/          root module — wires everything, publishes outputs
+└── modules/
+    ├── networking/            VPC, 3 AZs, 3-tier subnets, NAT, DB subnet group, flow logs
+    ├── security/              KMS CMK, Secrets Manager, app + db security groups
+    ├── rds/                   Multi-AZ PostgreSQL 16, parameter group, backups, monitoring
+    ├── monitoring/            SNS topic, 8 CloudWatch alarms, dashboard
+    └── bastion/               optional SSM-only maintenance host (default off)
+scripts/
+├── bootstrap.sh               preflight: toolchain, credentials, quotas
+├── validate.sh                assert the live environment matches its intent
+└── destroy.sh                 guarded teardown (clears deletion protection first)
+docs/
+├── architecture.md            diagram, decisions and their trade-offs
+├── cost.md                    ~$155/month, and how to cut it between sessions
+└── runbook-template.md        the twelve-section format
+runbooks/                      four incidents Phase 1 alarms can actually fire
+```
+
+Details, including why each decision was made: **[docs/architecture.md](docs/architecture.md)**.
+
+## Quickstart
+
+```bash
+./scripts/bootstrap.sh                      # preflight — tools, credentials, quotas
+
+cd terraform/environments/dev
+cp terraform.tfvars.example terraform.tfvars   # set owner, and alarm_email
+terraform init
+terraform plan
+terraform apply                             # 15–25 min; Multi-AZ is the slow part
+
+cd -
+./scripts/validate.sh                       # assert the deployed posture
+```
+
+Two things to expect on a first apply:
+
+- The parameter group reports `applying`, not `in-sync`, until the first
+  reboot. `shared_preload_libraries` and `rds.force_ssl` are `pending-reboot`
+  parameters. Reboot when convenient:
+  `aws rds reboot-db-instance --db-instance-identifier awsdblab-dev-postgres`
+- Alarms sit in `INSUFFICIENT_DATA` for a few minutes, and
+  `LatestRestorableTime` is empty until the first automated backup completes.
+  `validate.sh` reports both as warnings, not failures.
+
+Teardown, which `terraform destroy` alone cannot do (deletion protection is on
+by design):
+
+```bash
+./scripts/destroy.sh                # keeps a final snapshot
+./scripts/destroy.sh --no-snapshot  # deletes everything
+```
+
+**This costs roughly $155/month if left running.** See [docs/cost.md](docs/cost.md).
+
+## Connecting to the database
+
+There is no public endpoint, and `rds.force_ssl` is enforced. You need to be
+inside the VPC. Until the Phase 2 application exists, set `enable_bastion = true`
+and use Session Manager — no SSH key, no open port, IAM-authenticated:
+
+```bash
+aws ssm start-session --target "$(terraform -chdir=terraform/environments/dev output -raw bastion_instance_id)"
+
+# on the host
+SECRET=$(aws secretsmanager get-secret-value --secret-id awsdblab-dev/rds/master \
+  --query SecretString --output text)
+
+PGPASSWORD=$(jq -r .password <<<"$SECRET") psql \
+  "host=$(jq -r .host <<<"$SECRET") \
+   dbname=$(jq -r .dbname <<<"$SECRET") \
+   user=$(jq -r .username <<<"$SECRET") \
+   sslmode=require"
+```
+
+## Design decisions
+
+| | |
+| --- | --- |
+| Primary region | `us-east-1` (`us-west-2` joins in Phase 11) |
+| Database | PostgreSQL 16, Multi-AZ, `db.t4g.medium`, gp3 |
+| IaC | Terraform ≥ 1.9, AWS provider ~> 6.0 |
+| Compute | ECS Fargate (Phase 2) |
+| Observability | CloudWatch now, Prometheus + Grafana in Phase 3 |
+| CI/CD | GitHub Actions |
+| Secrets | AWS Secrets Manager, KMS-encrypted |
+| State | local for now; the `backend "s3"` block is present and commented |
+
+---
+
+# Roadmap
+
 We’ll ultimately build this:
                          GitHub
                             |

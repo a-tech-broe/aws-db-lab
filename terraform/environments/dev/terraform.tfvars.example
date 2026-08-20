@@ -1,0 +1,30 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
+
+aws_region  = "us-east-1"
+project     = "awsdblab"
+environment = "dev"
+owner       = "your-name"
+
+# --- Networking ---
+vpc_cidr           = "10.20.0.0/16"
+az_count           = 3
+single_nat_gateway = true # false = one NAT per AZ, ~$32/AZ/month extra
+
+# --- Database ---
+db_instance_class          = "db.t4g.medium"
+db_allocated_storage       = 50
+db_multi_az                = true
+db_backup_retention_period = 7
+db_deletion_protection     = true
+
+# Keep these consistent with db_instance_class -- they scale the alarms.
+db_max_connections       = 450        # db.t4g.medium
+db_instance_memory_bytes = 4294967296 # 4 GiB
+
+# --- Observability ---
+# You must click the confirmation link AWS emails before alarms are delivered.
+# alarm_email = "you@example.com"
+
+# --- Optional ---
+# SSM-only maintenance host, for running psql before the Phase 2 app exists.
+# enable_bastion = true

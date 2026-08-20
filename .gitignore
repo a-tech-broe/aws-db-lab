@@ -1,0 +1,31 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+.terraform.lock.hcl.bak
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+tfplan
+*.tfplan
+
+# Variable files may hold account IDs, emails and CIDRs
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Local tooling
+.env
+.envrc
+.DS_Store
+.vscode/
+
+# Lab output
+out/
+*.log
