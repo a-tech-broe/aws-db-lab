@@ -19,6 +19,7 @@ gets measured and written down.
 
 ```
 terraform/
+├── bootstrap/                 state bucket, GitHub OIDC provider, deploy role
 ├── environments/dev/          root module — wires everything, publishes outputs
 └── modules/
     ├── networking/            VPC, 3 AZs, 3-tier subnets, NAT, DB subnet group, flow logs
@@ -28,11 +29,15 @@ terraform/
     └── bastion/               optional SSM-only maintenance host (default off)
 scripts/
 ├── bootstrap.sh               preflight: toolchain, credentials, quotas
+├── db-connect.sh              psql over an SSM tunnel (password or IAM token)
 ├── validate.sh                assert the live environment matches its intent
 └── destroy.sh                 guarded teardown (clears deletion protection first)
+sql/
+└── 001-iam-auth-user.sql      grants rds_iam to a dedicated app_iam role
 docs/
 ├── architecture.md            diagram, decisions and their trade-offs
-├── cost.md                    ~$155/month, and how to cut it between sessions
+├── cicd.md                    plan on PR, apply on merge, OIDC, remote state
+├── cost.md                    $149/month measured, and how to cut it between sessions
 └── runbook-template.md        the twelve-section format
 runbooks/                      four incidents Phase 1 alarms can actually fire
 ```
@@ -72,26 +77,65 @@ by design):
 ./scripts/destroy.sh --no-snapshot  # deletes everything
 ```
 
-**This costs roughly $155/month if left running.** See [docs/cost.md](docs/cost.md).
+**This costs $149/month if left running** ($4.89/day; the database is 71% of it, the NAT gateway 22%). Breakdown and how to cut it: [docs/cost.md](docs/cost.md).
 
 ## Connecting to the database
 
-There is no public endpoint, and `rds.force_ssl` is enforced. You need to be
-inside the VPC. Until the Phase 2 application exists, set `enable_bastion = true`
-and use Session Manager — no SSH key, no open port, IAM-authenticated:
+```bash
+./scripts/db-connect.sh                    # master user, credential from Secrets Manager
+./scripts/db-connect.sh --iam              # app_iam user, short-lived IAM token
+./scripts/db-connect.sh -c 'SELECT 1;'     # one statement and exit
+```
+
+The script opens an SSM port-forward through the maintenance host, fetches the
+credential, and hands you a `psql` prompt. It closes the tunnel on exit.
+
+### Why a direct connection cannot work
+
+The instance is `publicly_accessible = false` and its subnets have no route to
+an internet or NAT gateway. The endpoint still resolves in public DNS, but to a
+**private** address:
+
+```
+$ dig +short awsdblab-dev-postgres...rds.amazonaws.com @8.8.8.8
+10.20.128.156
+```
+
+That address is unroutable from outside the VPC. Many home routers make it look
+like a different problem: DNS rebinding protection drops any answer containing
+an RFC1918 address, so the resolver returns nothing at all and `psql` reports
+
+```
+could not translate host name "..." to address: nodename nor servname provided
+```
+
+which reads like a typo rather than a network boundary doing its job.
+
+### TLS
+
+`rds.force_ssl = 1` means unencrypted connections are rejected outright.
+Connections negotiate **TLS 1.3 / AES-256-GCM**.
+
+Through the tunnel the script uses `sslmode=verify-ca`, not `verify-full`: the
+server certificate is issued for the RDS hostname, but `psql` connects to
+`127.0.0.1`, so hostname verification cannot match. `verify-ca` still validates
+the chain against the AWS root bundle. Connecting from *inside* the VPC (an ECS
+task in Phase 2) should use `verify-full`.
+
+### IAM database authentication
+
+`iam_database_authentication_enabled` is on, which makes RDS create the
+`rds_iam` role — but that alone authenticates nobody. A database user must be
+granted `rds_iam`, which `sql/001-iam-auth-user.sql` does for a dedicated
+`app_iam` role.
+
+It is deliberately **not** granted to the master user: a role holding `rds_iam`
+authenticates by IAM token *instead of* by password, so granting it to
+`dbadmin` would break the Secrets Manager path and lock the master account
+behind IAM.
 
 ```bash
-aws ssm start-session --target "$(terraform -chdir=terraform/environments/dev output -raw bastion_instance_id)"
-
-# on the host
-SECRET=$(aws secretsmanager get-secret-value --secret-id awsdblab-dev/rds/master \
-  --query SecretString --output text)
-
-PGPASSWORD=$(jq -r .password <<<"$SECRET") psql \
-  "host=$(jq -r .host <<<"$SECRET") \
-   dbname=$(jq -r .dbname <<<"$SECRET") \
-   user=$(jq -r .username <<<"$SECRET") \
-   sslmode=require"
+./scripts/db-connect.sh -f sql/001-iam-auth-user.sql   # already applied
 ```
 
 ## Design decisions
@@ -105,7 +149,7 @@ PGPASSWORD=$(jq -r .password <<<"$SECRET") psql \
 | Observability | CloudWatch now, Prometheus + Grafana in Phase 3 |
 | CI/CD | GitHub Actions |
 | Secrets | AWS Secrets Manager, KMS-encrypted |
-| State | local for now; the `backend "s3"` block is present and commented |
+| State | S3 + native lockfile (`use_lockfile`); bootstrapped by `terraform/bootstrap` |
 
 ---
 

@@ -115,24 +115,59 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
 
 # Burstable classes hide CPU exhaustion behind credit depletion: CPU looks
 # fine at 40% because the instance is being throttled to its baseline.
+#
+# A bare "CPUCreditBalance < N" alarm is unusable here. A freshly created
+# instance starts at zero credits and accrues roughly 15/hour, so it would
+# fire for the first two hours of every provision -- and Phase 5 provisions a
+# new instance on every restore drill. An alarm that always fires on creation
+# is an alarm people learn to ignore.
+#
+# What actually matters is low credits *while there is demand*. Metric math
+# expresses that as a single condition, so the alarm stays quiet on a fresh
+# idle instance and fires only when throttling is genuinely imminent.
 resource "aws_cloudwatch_metric_alarm" "cpu_credit_low" {
   count = var.is_burstable_instance ? 1 : 0
 
   alarm_name        = "${var.name_prefix}-rds-cpu-credits-low"
-  alarm_description = "CPU credit balance nearly exhausted on a burstable instance -- sustained throughput is about to be throttled to baseline. Runbook: runbooks/high-cpu.md"
+  alarm_description = "CPU credits nearly exhausted while under load -- sustained throughput is about to be throttled to baseline. Runbook: runbooks/high-cpu.md"
 
-  namespace   = "AWS/RDS"
-  metric_name = "CPUCreditBalance"
-  dimensions  = local.dimensions
-  statistic   = "Average"
-
-  comparison_operator = "LessThanThreshold"
-  threshold           = 30
-  period              = 300
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0.5
   evaluation_periods  = 2
+  treat_missing_data  = "notBreaching" # non-burstable classes never publish this
 
-  # Non-burstable classes never publish this metric; do not page for that.
-  treat_missing_data = "notBreaching"
+  metric_query {
+    id          = "credits"
+    return_data = false
+
+    metric {
+      namespace   = "AWS/RDS"
+      metric_name = "CPUCreditBalance"
+      dimensions  = local.dimensions
+      period      = 300
+      stat        = "Average"
+    }
+  }
+
+  metric_query {
+    id          = "cpu"
+    return_data = false
+
+    metric {
+      namespace   = "AWS/RDS"
+      metric_name = "CPUUtilization"
+      dimensions  = local.dimensions
+      period      = 300
+      stat        = "Average"
+    }
+  }
+
+  metric_query {
+    id          = "risk"
+    expression  = "IF(credits < ${var.cpu_credit_threshold} AND cpu > ${var.cpu_credit_cpu_floor}, 1, 0)"
+    label       = "credit exhaustion under load"
+    return_data = true
+  }
 
   alarm_actions = local.alarm_actions
   ok_actions    = local.alarm_actions

@@ -19,12 +19,19 @@ tfplan
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
+# *.auto.tfvars is committed on purpose: CI needs the non-secret settings, and
+# local + CI must agree or every pipeline plan shows phantom drift.
+!*.auto.tfvars
 
 # Local tooling
 .env
 .envrc
 .DS_Store
 .vscode/
+
+# Fetched artifacts
+# The RDS CA bundle; scripts/db-connect.sh downloads it on demand.
+global-bundle.pem
 
 # Lab output
 out/

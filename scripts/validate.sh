@@ -176,20 +176,37 @@ else
 fi
 
 if [[ "${QUICK}" == false ]]; then
-  # rds.force_ssl is the control that makes unencrypted connections impossible.
-  force_ssl="$(aws rds describe-db-parameters --region "${REGION}" \
-    --db-parameter-group-name "${pg_name}" \
-    --query "Parameters[?ParameterName=='rds.force_ssl'].ParameterValue | [0]" --output text)"
-  check "rds.force_ssl enforced" "1" "${force_ssl}"
+  # Fetch the parameter group ONCE as JSON and filter locally.
+  #
+  # Do not use --query here: the AWS CLI applies --query to each page
+  # separately, so a paginated result (this group returns ~420 parameters
+  # across 5 pages) yields one row per page rather than one row overall.
+  # Plain --output json merges the pages into a single document.
+  PARAMS_JSON="$(aws rds describe-db-parameters --region "${REGION}" \
+    --db-parameter-group-name "${pg_name}" --output json)"
 
-  preload="$(aws rds describe-db-parameters --region "${REGION}" \
-    --db-parameter-group-name "${pg_name}" \
-    --query "Parameters[?ParameterName=='shared_preload_libraries'].ParameterValue | [0]" --output text)"
+  param_value() {
+    jq -r --arg n "$1" \
+      '.Parameters[] | select(.ParameterName == $n) | .ParameterValue // ""' \
+      <<<"${PARAMS_JSON}"
+  }
+
+  # rds.force_ssl is the control that makes unencrypted connections impossible.
+  # RDS reports it with Source=system even when set by a user parameter group,
+  # so filter on the name only, never on --source.
+  check "rds.force_ssl enforced" "1" "$(param_value 'rds.force_ssl')"
+
+  preload="$(param_value 'shared_preload_libraries')"
   if [[ "${preload}" == *pg_stat_statements* ]]; then
     pass "pg_stat_statements preloaded"
   else
     fail "pg_stat_statements not in shared_preload_libraries (got '${preload}')"
   fi
+
+  track="$(param_value 'pg_stat_statements.track')"
+  check "pg_stat_statements.track" "ALL" "${track}"
+
+  unset PARAMS_JSON
 fi
 
 # --------------------------------------------------------------------------
