@@ -40,8 +40,13 @@ resource "aws_iam_role_policy_attachment" "monitoring" {
 
 # ---------------------------- Parameter group ------------------------------
 
+# name_prefix, not name: this group is create_before_destroy, so any forced
+# replacement (a bad parameter, or bumping parameter_group_family for a major
+# version upgrade) must be able to build the new group while the old one is
+# still attached to the instance. A fixed name collides with itself and the
+# apply fails with DBParameterGroupAlreadyExists.
 resource "aws_db_parameter_group" "this" {
-  name        = "${var.name_prefix}-pg"
+  name_prefix = "${var.name_prefix}-pg-"
   family      = var.parameter_group_family
   description = "PostgreSQL tuning and observability parameters for ${var.name_prefix}"
 
@@ -53,9 +58,10 @@ resource "aws_db_parameter_group" "this" {
     apply_method = "pending-reboot"
   }
 
+  # RDS enumerates this as NONE/TOP/ALL; match the casing exactly.
   parameter {
     name         = "pg_stat_statements.track"
-    value        = "all"
+    value        = "ALL"
     apply_method = "immediate"
   }
 
@@ -98,11 +104,16 @@ resource "aws_db_parameter_group" "this" {
     apply_method = "immediate"
   }
 
-  # Prefix every log line with timestamp, pid, user, db and application_name
-  # so the CloudWatch log group is greppable during an incident.
+  # RDS PostgreSQL accepts exactly two values for log_line_prefix:
+  #   %t:%r:%u@%d:[%p]:                              (the default)
+  #   %m:%r:%u@%d:[%p]:%l:%e:%s:%v:%x:%c:%q%a:       (verbose)
+  # Anything else is rejected by ModifyDBParameterGroup. Take the verbose one:
+  # beyond the default's timestamp/host/user/db/pid it adds millisecond
+  # precision (%m), SQLSTATE (%e), transaction id (%x) and application_name
+  # (%a) -- which is what makes a log line attributable during an incident.
   parameter {
     name         = "log_line_prefix"
-    value        = "%t:%r:%u@%d:[%p]:%a:"
+    value        = "%m:%r:%u@%d:[%p]:%l:%e:%s:%v:%x:%c:%q%a:"
     apply_method = "immediate"
   }
 
