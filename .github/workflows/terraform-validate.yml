@@ -52,4 +52,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck scripts/*.sh
+        # -x follows the sourced lib.sh so cross-file usage is checked too;
+        # SCRIPTDIR resolves the source= directives regardless of cwd.
+        run: shellcheck -x --source-path=SCRIPTDIR scripts/*.sh

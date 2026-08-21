@@ -11,6 +11,7 @@
 #   ./scripts/validate.sh --quick  skip the slower API sweeps
 # ---------------------------------------------------------------------------
 set -euo pipefail
+# shellcheck source=lib.sh disable=SC1091 # -x follows it; bare runs need not
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 QUICK=false
@@ -195,11 +196,19 @@ fi
 head2 "Observability"
 # --------------------------------------------------------------------------
 
-EXPECTED_ALARMS="$(tf_output_json alarm_names | jq -r '.[]')"
-ALARM_STATE="$(aws cloudwatch describe-alarms --region "${REGION}" \
-  --alarm-names ${EXPECTED_ALARMS} --output json)"
+# Read into an array rather than splitting a string: alarm names are passed
+# as separate argv entries, and a bare ${VAR} would also glob.
+EXPECTED_ALARMS=()
+while IFS= read -r alarm_name; do
+  [[ -n "${alarm_name}" ]] && EXPECTED_ALARMS+=("${alarm_name}")
+done < <(tf_output_json alarm_names | jq -r '.[]')
 
-for alarm in ${EXPECTED_ALARMS}; do
+[[ ${#EXPECTED_ALARMS[@]} -gt 0 ]] || die "the alarm_names output is empty"
+
+ALARM_STATE="$(aws cloudwatch describe-alarms --region "${REGION}" \
+  --alarm-names "${EXPECTED_ALARMS[@]}" --output json)"
+
+for alarm in "${EXPECTED_ALARMS[@]}"; do
   state="$(jq -r --arg a "${alarm}" \
     '.MetricAlarms[] | select(.AlarmName == $a) | .StateValue' <<<"${ALARM_STATE}")"
   case "${state}" in
@@ -221,6 +230,7 @@ else
 fi
 
 TOPIC_ARN="$(tf_output alarm_topic_arn)"
+# shellcheck disable=SC2016  # backticks are JMESPath literal quoting, not shell
 subs="$(aws sns list-subscriptions-by-topic --region "${REGION}" --topic-arn "${TOPIC_ARN}" \
   --query 'length(Subscriptions[?SubscriptionArn!=`PendingConfirmation`])' --output text)"
 if [[ "${subs}" -gt 0 ]]; then

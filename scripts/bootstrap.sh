@@ -7,6 +7,7 @@
 #   ./scripts/bootstrap.sh
 # ---------------------------------------------------------------------------
 set -euo pipefail
+# shellcheck source=lib.sh disable=SC1091 # -x follows it; bare runs need not
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 REGION="${AWS_REGION:-us-east-1}"
@@ -34,6 +35,7 @@ fi
 
 head2 "Account readiness"
 
+# shellcheck disable=SC2016  # backticks are JMESPath literal quoting, not shell
 az_count="$(aws ec2 describe-availability-zones --region "${REGION}" \
   --query 'length(AvailabilityZones[?ZoneType==`availability-zone` && State==`available`])' --output text)"
 if [[ "${az_count}" -ge 3 ]]; then
@@ -42,6 +44,7 @@ else
   fail "${REGION} exposes ${az_count} AZs; Phase 1 wants at least 3"
 fi
 
+# shellcheck disable=SC2016  # backticks are JMESPath literal quoting, not shell
 if aws rds describe-db-engine-versions --region "${REGION}" --engine postgres \
     --query 'DBEngineVersions[?starts_with(EngineVersion, `16.`)] | [0].EngineVersion' \
     --output text | grep -q '^16\.'; then

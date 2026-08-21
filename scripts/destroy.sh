@@ -16,6 +16,7 @@
 #   ./scripts/destroy.sh --auto-approve   no interactive confirmation
 # ---------------------------------------------------------------------------
 set -euo pipefail
+# shellcheck source=lib.sh disable=SC1091 # -x follows it; bare runs need not
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 require_tools terraform aws jq
