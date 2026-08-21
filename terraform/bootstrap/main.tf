@@ -25,7 +25,10 @@ locals {
     "${data.aws_caller_identity.current.account_id}-${var.project}-tfstate-${var.aws_region}"
   )
 
-  oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
+  create_oidc = var.create_deploy_role && var.create_oidc_provider
+  oidc_provider_arn = var.create_deploy_role ? (
+    local.create_oidc ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
+  ) : null
 }
 
 # ------------------------------ State bucket -------------------------------
@@ -125,7 +128,7 @@ resource "aws_s3_bucket_policy" "state" {
 # ------------------------------- GitHub OIDC -------------------------------
 
 resource "aws_iam_openid_connect_provider" "github" {
-  count = var.create_oidc_provider ? 1 : 0
+  count = local.create_oidc ? 1 : 0
 
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
@@ -135,7 +138,7 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 data "aws_iam_openid_connect_provider" "github" {
-  count = var.create_oidc_provider ? 0 : 1
+  count = var.create_deploy_role && !var.create_oidc_provider ? 1 : 0
 
   url = "https://token.actions.githubusercontent.com"
 }
@@ -144,6 +147,8 @@ data "aws_iam_openid_connect_provider" "github" {
 # and to two contexts only: pushes to the deploy branch, and pull_request runs.
 # Without the sub condition, ANY GitHub repository could assume this role.
 data "aws_iam_policy_document" "deploy_assume" {
+  count = var.create_deploy_role ? 1 : 0
+
   statement {
     effect  = "Allow"
     actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -171,9 +176,11 @@ data "aws_iam_policy_document" "deploy_assume" {
 }
 
 resource "aws_iam_role" "deploy" {
+  count = var.create_deploy_role ? 1 : 0
+
   name                 = "${var.project}-github-deploy"
   description          = "Assumed by GitHub Actions in ${var.github_repository} to run Terraform"
-  assume_role_policy   = data.aws_iam_policy_document.deploy_assume.json
+  assume_role_policy   = data.aws_iam_policy_document.deploy_assume[0].json
   max_session_duration = 3600
 
   tags = var.tags
@@ -182,6 +189,8 @@ resource "aws_iam_role" "deploy" {
 # --------------------------- Deploy permissions ----------------------------
 
 data "aws_iam_policy_document" "deploy_state" {
+  count = var.create_deploy_role ? 1 : 0
+
   statement {
     sid       = "ReadStateBucket"
     effect    = "Allow"
@@ -203,12 +212,16 @@ data "aws_iam_policy_document" "deploy_state" {
 }
 
 resource "aws_iam_role_policy" "deploy_state" {
+  count = var.create_deploy_role ? 1 : 0
+
   name   = "terraform-state"
-  role   = aws_iam_role.deploy.id
-  policy = data.aws_iam_policy_document.deploy_state.json
+  role   = aws_iam_role.deploy[0].id
+  policy = data.aws_iam_policy_document.deploy_state[0].json
 }
 
 data "aws_iam_policy_document" "deploy_infra" {
+  count = var.create_deploy_role ? 1 : 0
+
   # Networking, database, observability and secrets. Most of these APIs do not
   # support resource-level permissions on create, so the grant is service-wide.
   statement {
@@ -309,7 +322,7 @@ data "aws_iam_policy_document" "deploy_infra" {
       "iam:DetachRolePolicy",
       "iam:DeleteRole",
     ]
-    resources = [aws_iam_role.deploy.arn]
+    resources = [aws_iam_role.deploy[0].arn]
   }
 
   # Nor tamper with the bucket that records what it did.
@@ -327,7 +340,9 @@ data "aws_iam_policy_document" "deploy_infra" {
 }
 
 resource "aws_iam_role_policy" "deploy_infra" {
+  count = var.create_deploy_role ? 1 : 0
+
   name   = "terraform-infrastructure"
-  role   = aws_iam_role.deploy.id
-  policy = data.aws_iam_policy_document.deploy_infra.json
+  role   = aws_iam_role.deploy[0].id
+  policy = data.aws_iam_policy_document.deploy_infra[0].json
 }

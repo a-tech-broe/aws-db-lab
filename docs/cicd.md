@@ -50,20 +50,43 @@ GitHub runs the job immediately.
 For a database with `deletion_protection` and a 7-day PITR window, that manual
 approval is the last thing standing between a merge and a change to real data.
 
-## Authentication: OIDC, not access keys
+## Authentication
 
-There is no `AWS_ACCESS_KEY_ID` anywhere in this repository. The workflow mints
-a short-lived OIDC token and exchanges it for the deploy role created in
-`terraform/bootstrap`.
+The workflow uses three repository secrets that already exist:
 
-The trust policy pins the token's `sub` claim to this repository and to two
-contexts: `ref:refs/heads/main` and `pull_request`. Omitting that condition is
-the classic OIDC misconfiguration -- it would let any repository on GitHub
-assume the role.
+| Secret | Purpose |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID` | IAM user access key |
+| `AWS_SECRET_ACCESS_KEY` | its secret |
+| `AWS_REGION` | `us-east-1` |
+
+### Worth switching to OIDC later
+
+`terraform/bootstrap` can create a GitHub OIDC provider and a deploy role
+(`create_deploy_role = true`, the default). That replaces the long-lived key
+with a token minted per run and scoped by a trust policy pinned to this
+repository and to two contexts: `ref:refs/heads/main` and `pull_request`.
 
 The role also carries two explicit denies: it cannot edit its own trust policy
 or permissions (`DenySelfEscalation`), and it cannot delete the state bucket or
 disable its versioning (`DenyStateBucketAdmin`).
+
+Only the credentials step of the workflow changes:
+
+```yaml
+- uses: aws-actions/configure-aws-credentials@v4
+  with:
+    role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+    aws-region: ${{ vars.AWS_REGION }}
+```
+
+plus `id-token: write` in the job's `permissions`. Running with static keys is
+fine; this is the better posture when you get to it.
+
+Two things to know about the current setup: an access key is long-lived, so it
+is worth rotating on a schedule, and this repository is **public** -- never
+move a credential or a personal address out of secrets and into a committed
+file.
 
 ## Remote state is a prerequisite, not a nicety
 
@@ -107,9 +130,36 @@ terraform -chdir=terraform/bootstrap output -raw backend_block
 cd ../environments/dev
 terraform init -migrate-state
 
-# 3. Tell GitHub about the role
-terraform -chdir=../../bootstrap output -raw github_setup   # prints the gh commands
+# 3. The one secret that is still missing (see the warning below)
+gh secret set TF_VAR_ALARM_EMAIL --body 'you@example.com'
 ```
+
+Using static keys, only the state bucket is needed from bootstrap:
+
+```bash
+terraform apply -var create_deploy_role=false
+```
+
+## Required before the first CI apply
+
+`alarm_email` has no default. It comes from `terraform.tfvars` on your machine,
+which is gitignored, so CI does not see it -- and a plan without it wants to
+**delete the SNS email subscription**, silently removing your alerting. Verified
+by simulating a CI plan:
+
+```
+  # module.monitoring.aws_sns_topic_subscription.email[0] will be destroyed
+  Plan: 0 to add, 0 to change, 1 to destroy.
+```
+
+Fix it before merging anything:
+
+```bash
+gh secret set TF_VAR_ALARM_EMAIL --body 'you@example.com'
+```
+
+Do **not** move the address into `dev.auto.tfvars` instead. That file is
+committed and this repository is public.
 
 Then create the `dev` environment with a required reviewer, as above.
 

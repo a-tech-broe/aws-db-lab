@@ -10,12 +10,26 @@ variable "project" {
   default     = "awsdblab"
 }
 
+variable "create_deploy_role" {
+  description = <<-EOT
+    Create the GitHub OIDC provider and deploy role.
+
+    Set false if the pipeline authenticates with AWS_ACCESS_KEY_ID /
+    AWS_SECRET_ACCESS_KEY repository secrets instead -- only the state bucket
+    is needed then. OIDC removes the long-lived key and is the better posture,
+    but it is not required for the pipeline to work.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "github_repository" {
-  description = "owner/repo that is allowed to assume the deploy role."
+  description = "owner/repo allowed to assume the deploy role. Required when create_deploy_role is true."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
+    condition     = var.github_repository == null || can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
     error_message = "github_repository must be in owner/repo form."
   }
 }

@@ -9,12 +9,12 @@ output "state_bucket_arn" {
 }
 
 output "deploy_role_arn" {
-  description = "Role GitHub Actions assumes. Set this as the AWS_DEPLOY_ROLE_ARN repository variable."
-  value       = aws_iam_role.deploy.arn
+  description = "Role GitHub Actions assumes. Null when create_deploy_role is false."
+  value       = try(aws_iam_role.deploy[0].arn, null)
 }
 
 output "oidc_provider_arn" {
-  description = "GitHub OIDC provider ARN."
+  description = "GitHub OIDC provider ARN. Null when create_deploy_role is false."
   value       = local.oidc_provider_arn
 }
 
@@ -32,10 +32,13 @@ output "backend_block" {
 }
 
 output "github_setup" {
-  description = "The repository settings that must be configured by hand."
-  value       = <<-EOT
-    gh variable set AWS_DEPLOY_ROLE_ARN --body "${aws_iam_role.deploy.arn}"
-    gh variable set AWS_REGION          --body "${var.aws_region}"
-    gh secret   set TF_VAR_alarm_email  --body "<your-email>"
-  EOT
+  description = "Repository settings that must be configured by hand."
+  value = var.create_deploy_role ? join("\n", [
+    "gh variable set AWS_DEPLOY_ROLE_ARN --body '${try(aws_iam_role.deploy[0].arn, "")}'",
+    "gh variable set AWS_REGION          --body '${var.aws_region}'",
+    "gh secret   set TF_VAR_ALARM_EMAIL  --body '<your-email>'",
+    ]) : join("\n", [
+    "# Using static keys: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION are already set.",
+    "gh secret set TF_VAR_ALARM_EMAIL --body '<your-email>'",
+  ])
 }

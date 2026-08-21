@@ -58,6 +58,22 @@ variable "is_burstable_instance" {
   default     = true
 }
 
+variable "cpu_credit_threshold" {
+  description = "CPUCreditBalance below this counts as 'nearly exhausted' for the burstable alarm."
+  type        = number
+  default     = 30
+}
+
+variable "cpu_credit_cpu_floor" {
+  description = <<-EOT
+    CPU must also be above this for the credit alarm to fire. Without it the
+    alarm trips on every freshly created instance, which starts at zero
+    credits and idles at single-digit CPU.
+  EOT
+  type        = number
+  default     = 40
+}
+
 variable "cpu_threshold_percent" {
   description = "CPUUtilization alarm threshold."
   type        = number
