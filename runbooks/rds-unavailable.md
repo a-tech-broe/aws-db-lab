@@ -175,7 +175,8 @@ in §8 path D, restore the project group once the instance is stable:
 
 ```bash
 aws rds modify-db-instance --db-instance-identifier "$DB_ID" \
-  --db-parameter-group-name awsdblab-dev-pg --apply-immediately
+  --db-parameter-group-name "$(terraform -chdir=terraform/environments/dev output -raw db_parameter_group_name)" \
+  --apply-immediately
 aws rds reboot-db-instance --db-instance-identifier "$DB_ID"
 ```
 

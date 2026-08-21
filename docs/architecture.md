@@ -111,7 +111,7 @@ because a later phase needs it:
 | `rds.force_ssl`                       | `1`                  | Phase 9 — TLS is non-optional from day one |
 | `statement_timeout`                   | `900000` ms          | Guards against a runaway lab query        |
 | `idle_in_transaction_session_timeout` | `300000` ms          | Stops abandoned transactions pinning vacuum |
-| `log_line_prefix`                     | `%t:%r:%u@%d:[%p]:%a:` | Makes the log group greppable during an incident |
+| `log_line_prefix`                     | `%m:%r:%u@%d:[%p]:%l:%e:%s:%v:%x:%c:%q%a:` | Makes the log group greppable during an incident. RDS allows only two values for this; this is the verbose one, adding ms precision, SQLSTATE, txid and `application_name` |
 
 `shared_preload_libraries` and `rds.force_ssl` are `pending-reboot`; they take
 effect on the first reboot after apply. `validate.sh` reports the parameter
