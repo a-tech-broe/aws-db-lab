@@ -126,7 +126,7 @@ so changing `db_instance_class` does not silently invalidate them.
 | ------------------------- | ------------------- | --------------------------- | ------------ |
 | `rds-no-metrics`          | `DatabaseConnections` | missing data for 3 minutes | availability |
 | `rds-cpu-high`            | `CPUUtilization`    | > 80% for 3 min             | saturation   |
-| `rds-cpu-credits-low`     | `CPUCreditBalance`  | < 30 for 10 min             | saturation   |
+| `rds-cpu-credits-low`     | `CPUCreditBalance` + `CPUUtilization` | credits < 30 **and** CPU > 40% | saturation   |
 | `rds-memory-low`          | `FreeableMemory`    | < 10% of RAM for 5 min      | saturation   |
 | `rds-storage-low`         | `FreeStorageSpace`  | < 20% of allocated for 10 min | saturation |
 | `rds-connections-high`    | `DatabaseConnections` | > 80% of max_connections   | saturation   |
@@ -147,6 +147,14 @@ sustained load past the credit balance gets throttled to baseline. CPU sits at
 a comfortable-looking 40% while throughput collapses. Without this alarm, the
 CPU alarm never fires and the incident looks like a mystery. It is created only
 when `db_instance_class` matches a burstable family.
+
+It is a metric-math alarm rather than a plain threshold, and that is not
+decoration. A fresh instance starts at **zero** credits and accrues about 15
+per hour, so `CPUCreditBalance < 30` alone fires for the first two hours of
+every provision -- and Phase 5 provisions a new instance on every restore
+drill. Pairing it with `CPUUtilization > 40` means it stays quiet on a new idle
+instance and fires only when credits are low *and* something is asking for
+CPU.
 
 ## What Phase 1 deliberately does not build
 

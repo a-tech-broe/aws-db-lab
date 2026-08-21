@@ -19,6 +19,7 @@ gets measured and written down.
 
 ```
 terraform/
+├── bootstrap/                 state bucket, GitHub OIDC provider, deploy role
 ├── environments/dev/          root module — wires everything, publishes outputs
 └── modules/
     ├── networking/            VPC, 3 AZs, 3-tier subnets, NAT, DB subnet group, flow logs
@@ -32,6 +33,7 @@ scripts/
 └── destroy.sh                 guarded teardown (clears deletion protection first)
 docs/
 ├── architecture.md            diagram, decisions and their trade-offs
+├── cicd.md                    plan on PR, apply on merge, OIDC, remote state
 ├── cost.md                    ~$155/month, and how to cut it between sessions
 └── runbook-template.md        the twelve-section format
 runbooks/                      four incidents Phase 1 alarms can actually fire
@@ -94,6 +96,30 @@ PGPASSWORD=$(jq -r .password <<<"$SECRET") psql \
    sslmode=require"
 ```
 
+## CI/CD
+
+`.github/workflows/terraform.yml`:
+
+| Event | static | plan | apply |
+| --- | --- | --- | --- |
+| pull request | yes | yes, posted as a PR comment | no |
+| push to `main` | yes | yes | yes, behind an environment approval gate |
+
+The apply job runs only when the plan reported `-detailed-exitcode == 2`
+(changes actually present), and it applies the **saved plan artifact** rather
+than re-planning — so if state moves between plan and approval, Terraform
+refuses the stale plan instead of applying something unreviewed.
+
+Authentication is GitHub OIDC against the role in `terraform/bootstrap`; there
+is no AWS access key in this repository. `terraform destroy` is deliberately
+absent from the pipeline — teardown stays manual via `scripts/destroy.sh`.
+
+Three one-time steps are required before the pipeline can run: apply
+`terraform/bootstrap`, migrate the dev environment onto remote state, and set
+the repository variables. **A CI apply cannot work on local state** — it would
+start from an empty state file and try to recreate all 74 resources. Full
+setup: **[docs/cicd.md](docs/cicd.md)**.
+
 ## Design decisions
 
 | | |
@@ -105,7 +131,7 @@ PGPASSWORD=$(jq -r .password <<<"$SECRET") psql \
 | Observability | CloudWatch now, Prometheus + Grafana in Phase 3 |
 | CI/CD | GitHub Actions |
 | Secrets | AWS Secrets Manager, KMS-encrypted |
-| State | local for now; the `backend "s3"` block is present and commented |
+| State | S3 + native lockfile (`use_lockfile`); bootstrapped by `terraform/bootstrap` |
 
 ---
 

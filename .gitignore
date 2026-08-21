@@ -19,6 +19,9 @@ tfplan
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
+# *.auto.tfvars is committed on purpose: CI needs the non-secret settings, and
+# local + CI must agree or every pipeline plan shows phantom drift.
+!*.auto.tfvars
 
 # Local tooling
 .env

@@ -1,0 +1,223 @@
+name: terraform
+
+# Pipeline shape:
+#   pull_request -> static checks, then plan, posted as a PR comment
+#   push to main -> static checks, plan, then apply behind an environment gate
+#
+# Authentication uses the AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+# AWS_REGION repository secrets.
+#
+# terraform/bootstrap can also create a GitHub OIDC provider and deploy role,
+# which removes the long-lived key entirely and is worth switching to when
+# convenient -- see docs/cicd.md. Nothing else in this file changes if you do;
+# only the credentials step differs.
+
+on:
+  pull_request:
+    paths: ['terraform/**', 'scripts/**', '.github/workflows/terraform.yml']
+  push:
+    branches: [main]
+    paths: ['terraform/**', 'scripts/**', '.github/workflows/terraform.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: 1.14.3
+  ENV_DIR: terraform/environments/dev
+
+# Never let two runs touch the same state at once. cancel-in-progress is false
+# on purpose: cancelling a running apply mid-flight is how you get orphaned
+# resources and a stale lock.
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------- static --
+  # No credentials. Runs on forks too.
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff terraform/
+
+      - name: validate every module standalone
+        run: |
+          for dir in terraform/modules/*/; do
+            echo "::group::${dir}"
+            terraform -chdir="${dir}" init -backend=false -input=false
+            terraform -chdir="${dir}" validate
+            echo "::endgroup::"
+          done
+
+      - name: validate every root module
+        run: |
+          for dir in terraform/environments/*/ terraform/bootstrap/; do
+            echo "::group::${dir}"
+            terraform -chdir="${dir}" init -backend=false -input=false
+            terraform -chdir="${dir}" validate
+            echo "::endgroup::"
+          done
+
+      - name: shellcheck
+        # -x follows the sourced lib.sh so cross-file usage is checked too;
+        # SCRIPTDIR resolves the source= directives regardless of cwd.
+        run: shellcheck -x --source-path=SCRIPTDIR scripts/*.sh
+
+  # ------------------------------------------------------------------ plan --
+  plan:
+    needs: static
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # required to post the plan comment
+    outputs:
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform -chdir="${ENV_DIR}" init -input=false -lock-timeout=5m
+
+      - name: terraform plan
+        id: plan
+        env:
+          TF_VAR_alarm_email: ${{ secrets.TF_VAR_ALARM_EMAIL }}
+        run: |
+          set -o pipefail
+          # -detailed-exitcode: 0 = no changes, 2 = changes, 1 = error.
+          # Without it a failed plan is indistinguishable from an empty one.
+          terraform -chdir="${ENV_DIR}" plan \
+            -input=false -lock-timeout=5m -no-color \
+            -detailed-exitcode -out=tfplan 2>&1 | tee plan.txt && code=0 || code=$?
+          echo "exitcode=${code}" >> "$GITHUB_OUTPUT"
+          [ "${code}" = "1" ] && exit 1
+          exit 0
+
+      - name: summarize
+        run: |
+          {
+            echo "## Terraform plan"
+            case "${{ steps.plan.outputs.exitcode }}" in
+              0) echo "No changes. Infrastructure matches the configuration." ;;
+              2) echo "Changes detected -- see below." ;;
+            esac
+            echo '```terraform'
+            # The human-readable plan can exceed the 1MB step-summary limit.
+            grep -E '^(  [#~+-]|Plan:|No changes)' plan.txt | head -300
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: comment on the pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const raw = fs.readFileSync('plan.txt', 'utf8');
+            // GitHub caps a comment at 65536 characters.
+            const body = raw.length > 60000
+              ? raw.slice(0, 60000) + '\n...truncated, see the job summary...'
+              : raw;
+            const marker = '<!-- terraform-plan-dev -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const existing = (await github.rest.issues.listComments({
+              owner, repo, issue_number,
+            })).data.find(c => c.body.startsWith(marker));
+            const content =
+              `${marker}\n### Terraform plan — \`dev\`\n\n<details><summary>Show plan</summary>\n\n` +
+              '```terraform\n' + body + '\n```\n\n</details>';
+            // Update in place so a busy PR does not accumulate plan comments.
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: content });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: content });
+            }
+
+      - name: upload the plan
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: ${{ env.ENV_DIR }}/tfplan
+          retention-days: 5
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------- apply --
+  apply:
+    needs: plan
+    # Only merges to main, and only when the plan actually found changes.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.exitcode == '2'
+    runs-on: ubuntu-latest
+    # Configure this environment in repository settings with a required
+    # reviewer. That approval gate is the last thing standing between a merge
+    # and a change to a production database.
+    environment: dev
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform -chdir="${ENV_DIR}" init -input=false -lock-timeout=5m
+
+      - name: download the reviewed plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: ${{ env.ENV_DIR }}
+
+      - name: terraform apply
+        # Applying the saved plan, not re-planning. If the state moved between
+        # plan and approval, Terraform refuses the stale plan rather than
+        # applying something nobody reviewed.
+        run: |
+          set -o pipefail
+          terraform -chdir="${ENV_DIR}" apply \
+            -input=false -lock-timeout=5m -no-color tfplan 2>&1 | tee apply.txt
+
+      - name: summarize
+        if: always()
+        run: |
+          {
+            echo "## Terraform apply"
+            echo '```'
+            tail -30 apply.txt 2>/dev/null || echo "apply produced no output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: post-apply validation
+        # Asserts the live environment still matches Phase 1's intent:
+        # private database, encryption, Multi-AZ, backups, alarms with actions.
+        run: ./scripts/validate.sh
