@@ -29,6 +29,10 @@ tfplan
 .DS_Store
 .vscode/
 
+# Fetched artifacts
+# The RDS CA bundle; scripts/db-connect.sh downloads it on demand.
+global-bundle.pem
+
 # Lab output
 out/
 *.log
